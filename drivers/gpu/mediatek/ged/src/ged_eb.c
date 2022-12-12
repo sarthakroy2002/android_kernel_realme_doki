@@ -29,6 +29,7 @@
 #include "ged_dvfs.h"
 
 #include "ged_log.h"
+#include "ged_global.h"
 
 #include <mt-plat/mtk_gpu_utility.h>
 
@@ -172,7 +173,7 @@ int ged_to_fdvfs_command(unsigned int cmd, struct fdvfs_ipi_data *ipi_data)
 			FASTDVFS_IPI_TIMEOUT);
 
 		if (ret != 0) {
-			GPUFDVFS_LOGI("(%d), cmd: %d, mtk_ipi_send_compl, ret: %d\n",
+			GPUFDVFS_LOGI("(%d), cmd: %u, mtk_ipi_send_compl, ret: %d\n",
 				__LINE__, cmd, ret);
 		} else {
 			ret = fdvfs_ipi_rcv_msg.u.set_para.arg[0];
@@ -318,6 +319,7 @@ unsigned int mtk_gpueb_dvfs_set_feedback_info(int frag_done_interval_in_ns,
 	if (curr_fps > 0)
 		mtk_gpueb_sysram_write(SYSRAM_GPU_FEEDBACK_INFO_CURR_FPS,
 			curr_fps);
+	ret = mtk_gpueb_sysram_read(SYSRAM_GPU_TA_3D_COEF);
 #else
 	struct fdvfs_ipi_data ipi_data;
 
@@ -362,8 +364,13 @@ int mtk_gpueb_dvfs_set_taget_frame_time(unsigned int target_frame_time,
 	int ret = 0;
 	struct fdvfs_ipi_data ipi_data;
 	static unsigned int pre_target_frame_time;
+	static unsigned int pre_target_margin;
 
-	if (target_frame_time != pre_target_frame_time) {
+	if (g_fastdvfs_margin)
+		target_margin = 999;
+
+	if (target_frame_time != pre_target_frame_time ||
+		target_margin != pre_target_margin) {
 #ifdef FDVFS_REDUCE_IPI
 		mtk_gpueb_sysram_write(SYSRAM_GPU_SET_TARGET_FRAME_TIME,
 			target_frame_time);
@@ -378,6 +385,7 @@ int mtk_gpueb_dvfs_set_taget_frame_time(unsigned int target_frame_time,
 	}
 
 	pre_target_frame_time = target_frame_time;
+	pre_target_margin = target_margin;
 
 	return ret;
 }
@@ -852,7 +860,7 @@ void fdvfs_init(void)
 				WQ_FREEZABLE | WQ_MEM_RECLAIM);
 	}
 
-	GPUFDVFS_LOGI("succeed to register channel: (%d)(%d), ipi_size: %d\n",
+	GPUFDVFS_LOGI("succeed to register channel: (%d)(%d), ipi_size: %u\n",
 		g_fast_dvfs_ipi_channel,
 		g_fdvfs_event_ipi_channel,
 		FDVFS_IPI_DATA_LEN);
