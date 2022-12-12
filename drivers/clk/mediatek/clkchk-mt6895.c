@@ -649,10 +649,7 @@ void print_subsys_reg_mt6895(enum chk_sys_id id)
 	const struct regname *rns = &rn[0];
 	int i;
 
-	if (rns == NULL)
-		return;
-
-	if (id >= chk_sys_num || id < 0) {
+	if (id >= chk_sys_num) {
 		pr_info("wrong id:%d\n", id);
 		return;
 	}
@@ -737,8 +734,9 @@ static bool is_pll_chk_bug_on(void)
 
 static void dump_hwv_history(struct regmap *regmap, u32 id)
 {
-	u32 addr[16], val[16];
-	u32 idx, set, sta, set_sta, clr_sta, en, done;
+	u32 addr[16] = {0}, val[16] = {0};
+	u32 idx = 0, set = 0, sta = 0, done = 0;
+	u32 en = 0, clr_sta = 0, set_sta = 0;
 	int i;
 
 	regmap_write(regmap, HWV_DOMAIN_KEY, HWV_SECURE_KEY);
@@ -779,7 +777,7 @@ static bool is_cg_chk_pwr_on(void)
 
 static void dump_hwv_pll_reg(struct regmap *regmap, u32 shift)
 {
-	u32 val[7];
+	u32 val[7] = { 0 };
 
 	regmap_write(regmap, HWV_DOMAIN_KEY, HWV_SECURE_KEY);
 	regmap_read(regmap, HWV_PLL_SET, &val[0]);
