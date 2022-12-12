@@ -77,7 +77,7 @@ static void commit_write_sensor(struct subdrv_ctx *ctx)
 static void set_cmos_sensor_16(struct subdrv_ctx *ctx,
 			kal_uint16 reg, kal_uint16 val)
 {
-	if (_size_to_write > _I2C_BUF_SIZE - 2)
+	if (_size_to_write + 2 >= _I2C_BUF_SIZE)
 		commit_write_sensor(ctx);
 
 	_i2c_data[_size_to_write++] = reg;
@@ -638,7 +638,7 @@ static void slim_video_setting(struct subdrv_ctx *ctx)
 		   sizeof(addr_data_pair_slim_video) / sizeof(kal_uint16));
 }	/*	slim_video_setting  */
 
-#define FOUR_CELL_SIZE 3072
+#define FOUR_CELL_SIZE 2048
 #define FOUR_CELL_ADDR 0x150F
 static char four_cell_data[FOUR_CELL_SIZE + 2];
 static void read_four_cell_from_eeprom(struct subdrv_ctx *ctx, char *data)
@@ -648,7 +648,7 @@ static void read_four_cell_from_eeprom(struct subdrv_ctx *ctx, char *data)
 
 	if (data != NULL) {
 		LOG_INF("return data\n");
-		memcpy(data, four_cell_data, FOUR_CELL_SIZE);
+		memcpy(data, four_cell_data, FOUR_CELL_SIZE + 2);
 	} else {
 		LOG_INF("need to read from EEPROM\n");
 		/* Check I2C is normal */
@@ -661,9 +661,10 @@ static void read_four_cell_from_eeprom(struct subdrv_ctx *ctx, char *data)
 		four_cell_data[0] = (FOUR_CELL_SIZE & 0xFF);/*Low*/
 		four_cell_data[1] = ((FOUR_CELL_SIZE >> 8) & 0xFF);/*High*/
 		/*Multi-Read*/
-		for (i = 2; i < (FOUR_CELL_SIZE + 2); i++)
+		for (i = 0; i < FOUR_CELL_SIZE; i++)
 			adaptor_i2c_rd_u8(ctx->i2c_client,
-				S5K3P9SP_EEPROM_READ_ID >> 1, FOUR_CELL_ADDR, &four_cell_data[i]);
+				S5K3P9SP_EEPROM_READ_ID >> 1,
+				FOUR_CELL_ADDR + i, &four_cell_data[i+2]);
 		ctx->is_read_four_cell = 1;
 	}
 }
@@ -945,7 +946,8 @@ static int get_resolution(struct subdrv_ctx *ctx,
 	int i = 0;
 
 	for (i = SENSOR_SCENARIO_ID_MIN; i < SENSOR_SCENARIO_ID_MAX; i++) {
-		if (i < imgsensor_info.sensor_mode_num) {
+		if (i < imgsensor_info.sensor_mode_num &&
+			i < ARRAY_SIZE(imgsensor_winsize_info)) {
 			sensor_resolution->SensorWidth[i] = imgsensor_winsize_info[i].w2_tg_size;
 			sensor_resolution->SensorHeight[i] = imgsensor_winsize_info[i].h2_tg_size;
 		} else {

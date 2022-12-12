@@ -143,6 +143,18 @@ extern int FP5510E2AF_Release(struct inode *a_pstInode,
 	struct file *a_pstFile);
 extern int FP5510E2AF_GetFileName(unsigned char *pFileName);
 
+#define FP5513E4AF_SetI2Cclient FP5513E4AF_SetI2Cclient_Main
+#define FP5513E4AF_Ioctl FP5513E4AF_Ioctl_Main
+#define FP5513E4AF_Release FP5513E4AF_Release_Main
+#define FP5513E4AF_GetFileName FP5513E4AF_GetFileName_Main
+extern int FP5513E4AF_SetI2Cclient(struct i2c_client *pstAF_I2Cclient,
+	spinlock_t *pAF_SpinLock, int *pAF_Opened);
+extern long FP5513E4AF_Ioctl(struct file *a_pstFile,
+	unsigned int a_u4Command, unsigned long a_u4Param);
+extern int FP5513E4AF_Release(struct inode *a_pstInode,
+	struct file *a_pstFile);
+extern int FP5513E4AF_GetFileName(unsigned char *pFileName);
+
 #define DW9814AF_SetI2Cclient DW9814AF_SetI2Cclient_Main
 #define DW9814AF_Ioctl DW9814AF_Ioctl_Main
 #define DW9814AF_Release DW9814AF_Release_Main

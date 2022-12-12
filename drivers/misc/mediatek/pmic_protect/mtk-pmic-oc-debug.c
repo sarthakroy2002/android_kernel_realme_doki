@@ -72,6 +72,7 @@ static struct oc_debug_t mt6855_oc_debug[] = {
 	REG_OC_DEBUG(mt6369_vmc),
 	REG_OC_DEBUG(mt6369_vant18),
 	REG_OC_DEBUG(mt6369_vaux18),
+	MD_REG_OC_DEBUG(mt6369_vpa, BIT(0)),
 };
 
 static struct oc_debug_t mt6879_oc_debug[] = {
@@ -109,6 +110,7 @@ static struct oc_debug_t mt6879_oc_debug[] = {
 	REG_OC_DEBUG(mt6368_vcn33_1),
 	REG_OC_DEBUG(mt6368_vcn33_2),
 	REG_OC_DEBUG(mt6368_vefuse),
+	MD_REG_OC_DEBUG(mt6368_vpa, BIT(0)),
 };
 
 static struct oc_debug_t mt6983_oc_debug[] = {
@@ -171,12 +173,14 @@ static struct oc_debug_info mt6983_debug_info = {
 
 static int md_oc_notify(struct oc_debug_t *oc_dbg)
 {
+#if IS_ENABLED(CONFIG_MTK_ECCCI_DRIVER)
 	int ret;
 
 	ret = exec_ccci_kern_func_by_md_id(MD_SYS1, ID_PMIC_INTR,
 					   &oc_dbg->md_data, 4);
 	if (ret)
 		pr_notice("[%s]-exec_ccci fail:%d\n", __func__, ret);
+#endif
 	return 0;
 }
 

@@ -67,6 +67,10 @@ static bool watchdog_thread_exist;
 static bool system_server_exist;
 #endif
 
+#define MAX_NR_SPECIAL_PROCESS 20
+#define MAX_NR_THREAD 8192
+static struct task_struct **thread_array;
+
 static bool Hang_first_done;
 static bool hd_detect_enabled;
 static bool hd_zygote_stopped;
@@ -83,12 +87,16 @@ static struct proc_dir_entry *pe;
 
 DECLARE_WAIT_QUEUE_HEAD(dump_bt_start_wait);
 DECLARE_WAIT_QUEUE_HEAD(dump_bt_done_wait);
-DEFINE_RAW_SPINLOCK(white_list_lock);
+DEFINE_MUTEX(white_list_lock);
 DEFINE_RAW_SPINLOCK(callback_list_lock);
 
 static void show_status(int flag);
 static void monitor_hang_kick(int lParam);
 static void show_bt_by_pid(int task_pid);
+static void log_hang_info(const char *fmt, ...);
+static bool check_white_list(void);
+static int find_task_by_name(char *name);
+static int run_callback(void);
 
 static void (*p_ldt_disable_aee)(void);
 void monitor_hang_regist_ldt(void (*fn)(void))
@@ -107,18 +115,18 @@ int add_white_list(char *name)
 	struct name_list *new_thread;
 	struct name_list *pList;
 
-	raw_spin_lock(&white_list_lock);
+	mutex_lock(&white_list_lock);
 	if (!white_list) {
 		new_thread = kmalloc(sizeof(struct name_list), GFP_KERNEL);
 		if (!new_thread) {
-			raw_spin_unlock(&white_list_lock);
+			mutex_unlock(&white_list_lock);
 			return -1;
 		}
 		strncpy(new_thread->name, name, TASK_COMM_LEN);
 		new_thread->name[TASK_COMM_LEN - 1] = 0;
 		new_thread->next = NULL;
 		white_list = new_thread;
-		raw_spin_unlock(&white_list_lock);
+		mutex_unlock(&white_list_lock);
 		return 0;
 	}
 
@@ -126,7 +134,7 @@ int add_white_list(char *name)
 	while (pList) {
 		/*find same thread name*/
 		if (strncmp(pList->name, name, TASK_COMM_LEN) == 0) {
-			raw_spin_unlock(&white_list_lock);
+			mutex_unlock(&white_list_lock);
 			return 0;
 		}
 		pList = pList->next;
@@ -135,14 +143,14 @@ int add_white_list(char *name)
 	/*add new thread name*/
 	new_thread = kmalloc(sizeof(struct name_list), GFP_KERNEL);
 	if (!new_thread) {
-		raw_spin_unlock(&white_list_lock);
+		mutex_unlock(&white_list_lock);
 		return -1;
 	}
 
 	strncpy(new_thread->name, name, TASK_COMM_LEN);
 	new_thread->next = white_list;
 	white_list = new_thread;
-	raw_spin_unlock(&white_list_lock);
+	mutex_unlock(&white_list_lock);
 	return 0;
 }
 
@@ -154,7 +162,7 @@ int del_white_list(char *name)
 	if (!white_list)
 		return 0;
 
-	raw_spin_lock(&white_list_lock);
+	mutex_lock(&white_list_lock);
 	pList = pList_old = white_list;
 	while (pList) {
 		/*find same thread name*/
@@ -162,19 +170,19 @@ int del_white_list(char *name)
 			if (pList == white_list) {
 				white_list = pList->next;
 				kfree(pList);
-				raw_spin_unlock(&white_list_lock);
+				mutex_unlock(&white_list_lock);
 				return 0;
 			}
 
 			pList_old->next = pList->next;
 			kfree(pList);
-			raw_spin_unlock(&white_list_lock);
+			mutex_unlock(&white_list_lock);
 			return 0;
 		}
 		pList_old = pList;
 		pList = pList->next;
 	}
-	raw_spin_unlock(&white_list_lock);
+	mutex_unlock(&white_list_lock);
 	return 0;
 }
 
@@ -222,9 +230,40 @@ do {                \
 		pr_debug(x);        \
 } while (0)
 
+static void monitor_hang_callback_dummy1(void)
+{
+	log_hang_info("callback 1 ok\n");
+}
+
+static void monitor_hang_callback_dummy2(void)
+{
+	log_hang_info("callback 2 ok\n");
+}
+
+static int show_white_list_bt(struct task_struct *p)
+{
+	struct name_list *pList = NULL;
+
+	if (!white_list)
+		return -1;
+
+	mutex_lock(&white_list_lock);
+	pList = white_list;
+	while (pList) {
+		if (!strcmp(p->comm, pList->name)) {
+			mutex_unlock(&white_list_lock);
+			show_bt_by_pid(p->pid);
+			return 0;
+		}
+		pList = pList->next;
+	}
+	mutex_unlock(&white_list_lock);
+	return -1;
+}
+
 static int monitor_hang_show(struct seq_file *m, void *v)
 {
-	SEQ_printf(m, "show hang_detect_raw");
+	SEQ_printf(m, "show hang_detect_raw\n");
 	SEQ_printf(m, "%s", Hang_Info);
 	return 0;
 }
@@ -241,6 +280,7 @@ static ssize_t monitor_hang_proc_write(struct file *filp, const char *ubuf,
 	char buf[64];
 	long val;
 	int ret;
+	struct task_struct *p;
 
 	if (cnt >= sizeof(buf))
 		return -EINVAL;
@@ -258,11 +298,31 @@ static ssize_t monitor_hang_proc_write(struct file *filp, const char *ubuf,
 	if (val == 2) {
 		reset_hang_info();
 		show_status(0);
-	} else if (val == 3) {
-		reset_hang_info();
-		show_status(1);
-	} else if (val > 10) {
-		show_bt_by_pid((int)val);
+
+		log_hang_info("white list start\n");
+		add_white_list("system_server");
+		add_white_list("name1");
+		add_white_list("name2");
+		del_white_list("name1");
+		del_white_list("name2");
+		check_white_list();
+		rcu_read_lock();
+		for_each_process(p) {
+			if (!strcmp(p->comm, "system_server"))
+				break;
+		}
+		rcu_read_unlock();
+		if (show_white_list_bt(p) == 0)
+			log_hang_info("white list ok\n");
+		del_white_list("system_server");
+		log_hang_info("white list done\n");
+
+		if (find_task_by_name("system_server") == p->pid)
+			log_hang_info("find task by name ok\n");
+
+		register_hang_callback(monitor_hang_callback_dummy1);
+		register_hang_callback(monitor_hang_callback_dummy2);
+		run_callback();
 	}
 
 	return cnt;
@@ -622,6 +682,13 @@ void show_thread_info(struct task_struct *p, bool dump_bt)
 		task_pid_nr(p), p->nvcsw, p->nivcsw, p->flags,
 		(unsigned long)task_thread_info(p)->flags,
 		p->tgid);
+
+#if IS_ENABLED(CONFIG_SMP)
+	log_hang_info("%d ", p->cpu);
+	hang_log("%d ", p->cpu);
+#endif
+	log_hang_info("%d ", p->rt_priority ? p->rt_priority : p->normal_prio);
+	hang_log("%d ", p->rt_priority ? p->rt_priority : p->normal_prio);
 #ifdef CONFIG_SCHED_INFO
 	log_hang_info("%llu", p->sched_info.last_arrival);
 	hang_log("%llu", p->sched_info.last_arrival);
@@ -640,7 +707,7 @@ void show_thread_info(struct task_struct *p, bool dump_bt)
 #endif
 
 #ifdef CONFIG_STACKTRACE
-	if (dump_bt || ((p->state == TASK_RUNNING ||
+	if (dump_bt || ((!p->mm || p->state == TASK_RUNNING ||
 			p->state & TASK_UNINTERRUPTIBLE) &&
 			!strstr(p->comm, "wdtk")))
 	/* Catch kernel-space backtrace */
@@ -677,6 +744,7 @@ static int dump_native_maps(pid_t pid, struct task_struct *current_task)
 		return -1;
 	}
 
+	mmap_read_lock(current_task->mm);
 	vma = current_task->mm->mmap;
 	log_hang_info("Dump native maps files:\n");
 	hang_log("Dump native maps files:\n");
@@ -744,9 +812,8 @@ static int dump_native_maps(pid_t pid, struct task_struct *current_task)
 		vma = vma->vm_next;
 		mapcount++;
 	}
-	++oops_in_progress; /* sleeping function warn */
+	mmap_read_unlock(current_task->mm);
 	mmput(current_task->mm);
-	--oops_in_progress;
 
 	return 0;
 }
@@ -805,6 +872,7 @@ static int dump_native_info_by_tid(pid_t tid,
 
 	userstack_start = (unsigned long)user_ret->ARM_sp;
 
+	mmap_read_lock(current_task->mm);
 	vma = current_task->mm->mmap;
 	while (vma) {
 		if (vma->vm_start <= userstack_start &&
@@ -823,12 +891,12 @@ static int dump_native_info_by_tid(pid_t tid,
 		return ret;
 	}
 	length = userstack_end - userstack_start;
-
+	mmap_read_unlock(current_task->mm);
 
 	/* dump native stack to buffer */
 	{
 		unsigned long SPStart = 0, SPEnd = 0;
-		int tempSpContent[4], copied;
+		int tempSpContent[4] = {0}, copied;
 
 		SPStart = userstack_start;
 		SPEnd = SPStart + length;
@@ -837,12 +905,10 @@ static int dump_native_info_by_tid(pid_t tid,
 		hang_log("UserSP_start:%08x,Length:%08x,End:%08x\n",
 				SPStart, length, SPEnd);
 		while (SPStart < SPEnd) {
-			++oops_in_progress; /* sleeping function warn */
 			copied =
 			    access_process_vm(current_task, SPStart,
 					&tempSpContent, sizeof(tempSpContent),
 					0);
-			--oops_in_progress;
 			if (copied != sizeof(tempSpContent)) {
 				pr_info("access_process_vm  SPStart error,sizeof(tempSpContent)=%x\n",
 				  (unsigned int)sizeof(tempSpContent));
@@ -910,6 +976,7 @@ static int dump_native_info_by_tid(pid_t tid,
 			(long)(user_ret->user_regs.regs[1]),
 			(long)(user_ret->user_regs.regs[0]));
 		userstack_start = (unsigned long)user_ret->user_regs.regs[13];
+		mmap_read_lock(current_task->mm);
 		vma = current_task->mm->mmap;
 		while (vma) {
 			if (vma->vm_start <= userstack_start &&
@@ -928,6 +995,7 @@ static int dump_native_info_by_tid(pid_t tid,
 		}
 
 		length = userstack_end - userstack_start;
+		mmap_read_unlock(current_task->mm);
 
 		/*  dump native stack to buffer */
 		{
@@ -941,11 +1009,9 @@ static int dump_native_info_by_tid(pid_t tid,
 			hang_log("UserSP_start:%lx,Length:%lx,End:%lx\n",
 				SPStart, length, SPEnd);
 			while (SPStart < SPEnd) {
-				++oops_in_progress; /* sleeping function warn */
 				copied = access_process_vm(current_task,
 						SPStart, &tempSpContent,
 						sizeof(tempSpContent), 0);
-				--oops_in_progress;
 				if (copied != sizeof(tempSpContent)) {
 					pr_info(
 					  "access_process_vm  SPStart error,sizeof(tempSpContent)=%x\n",
@@ -974,7 +1040,7 @@ static int dump_native_info_by_tid(pid_t tid,
 		}
 	} else {		/*K64+U64 */
 		userstack_start = (unsigned long)user_ret->user_regs.sp;
-
+		mmap_read_lock(current_task->mm);
 		vma = current_task->mm->mmap;
 		while (vma) {
 			if (vma->vm_start <= userstack_start &&
@@ -986,6 +1052,7 @@ static int dump_native_info_by_tid(pid_t tid,
 			if (vma == current_task->mm->mmap)
 				break;
 		}
+		mmap_read_unlock(current_task->mm);
 		if (!userstack_end) {
 			pr_info("Dump native stack failed:\n");
 			return ret;
@@ -1002,22 +1069,18 @@ static int dump_native_info_by_tid(pid_t tid,
 			frames = 2;
 			while (tmpfp < userstack_end &&
 					tmpfp > userstack_start) {
-				++oops_in_progress; /* sleeping function warn */
 				copied =
 				    access_process_vm(current_task,
 						    (unsigned long)tmpfp, &tmp,
 						      sizeof(tmp), 0);
-				--oops_in_progress;
 				if (copied != sizeof(tmp)) {
 					pr_info("access_process_vm  fp error\n");
 					return -EIO;
 				}
-				++oops_in_progress; /* sleeping function warn */
 				copied =
 				    access_process_vm(current_task,
 						    (unsigned long)tmpfp + 0x08,
 						      &tmpLR, sizeof(tmpLR), 0);
-				--oops_in_progress;
 				if (copied != sizeof(tmpLR)) {
 					pr_info("access_process_vm  pc error\n");
 					return -EIO;
@@ -1074,7 +1137,7 @@ static void show_bt_by_pid(int task_pid)
 				pr_info(" %s,%d:%s,fail in user_mode", __func__,
 						task_pid, t->comm);
 				dump_native = 0;
-			} else	if (!t->mm) {
+			} else if (!t->mm) {
 				pr_info(" %s,%d:%s, current_task->mm == NULL", __func__,
 						task_pid, t->comm);
 				dump_native = 0;
@@ -1100,67 +1163,100 @@ static void show_bt_by_pid(int task_pid)
 				t->comm, task_pid, state < sizeof(stat_nam) - 1 ?
 				stat_nam[state] : '?', t->flags);
 		}
-		do {
-			if (!t)
-				break;
+		if (unlikely(dump_native == 1)) {
+			int thread_array_index = 0;
+			int i = 0;
 
-			get_task_struct(t);
-			if (try_get_task_stack(t)) {
-				pid_t tid = 0;
+			rcu_read_lock();
+			do {
+				if (!t)
+					break;
+				/* save thread */
+				get_task_struct(t);
+				thread_array[thread_array_index] = t;
+				thread_array_index++;
+				if (thread_array_index >= MAX_NR_THREAD) {
+					pr_info("Number of threads exceeding %d\n", MAX_NR_THREAD);
+					break;
+				}
+			} while_each_thread(p, t);
+			rcu_read_unlock();
+			/* native thread bt dump */
+			for (i = 0; i < thread_array_index; i++) {
+				t = thread_array[i];
+				if (try_get_task_stack(t)) {
+					pid_t tid = 0;
 
-				tid = task_pid_vnr(t);
-				state = t->state ? __ffs(t->state) + 1 : 0;
-				/* catch kernel bt */
-				show_thread_info(t, true);
-
-				log_hang_info("%s sysTid=%d, pid=%d\n", t->comm,
-						tid, task_pid);
-				hang_log("%s sysTid=%d, pid=%d\n", t->comm,
-						tid, task_pid);
-
-				if (dump_native == 1)
+					tid = task_pid_vnr(t);
+					/* catch kernel bt */
+					show_thread_info(t, true);
+					log_hang_info("%s sysTid=%d, pid=%d\n", t->comm,
+							tid, task_pid);
+					hang_log("%s sysTid=%d, pid=%d\n", t->comm,
+							tid, task_pid);
 					dump_native_info_by_tid(tid, t);
-
-				put_task_stack(t);
+					put_task_stack(t);
+					log_hang_info("-\n");
+				}
+				put_task_struct(t);
 			}
-			put_task_struct(t);
-			log_hang_info("-\n");
-		} while_each_thread(p, t);
+		} else {
+			rcu_read_lock();
+			do {
+				if (!t)
+					break;
 
-		put_task_struct(p);  /* pairing get_pid_task */
+				get_task_struct(t);
+				if (try_get_task_stack(t)) {
+					pid_t tid = 0;
+
+					tid = task_pid_vnr(t);
+					/* catch kernel bt */
+					show_thread_info(t, true);
+
+					log_hang_info("%s sysTid=%d, pid=%d\n", t->comm,
+							tid, task_pid);
+					hang_log("%s sysTid=%d, pid=%d\n", t->comm,
+							tid, task_pid);
+
+					put_task_stack(t);  /* pairing get_pid_task */
+				}
+				put_task_struct(t);
+				log_hang_info("-\n");
+			} while_each_thread(p, t);
+			rcu_read_unlock();
+		}
+		put_task_struct(p); /* pairing get_pid_task */
 	}
 	put_pid(pid);
 }
 
-static int show_white_list_bt(struct task_struct *p)
+static int is_in_white_list(struct task_struct *p)
 {
 	struct name_list *pList = NULL;
 
 	if (!white_list)
 		return -1;
 
-
-	raw_spin_lock(&white_list_lock);
+	mutex_lock(&white_list_lock);
 	pList = white_list;
 	while (pList) {
 		if (!strcmp(p->comm, pList->name)) {
-			raw_spin_unlock(&white_list_lock);
-			show_bt_by_pid(p->pid);
+			mutex_unlock(&white_list_lock);
 			return 0;
 		}
 		pList = pList->next;
 	}
-	raw_spin_unlock(&white_list_lock);
+	mutex_unlock(&white_list_lock);
 	return -1;
 }
 
-static int run_callback()
+static int run_callback(void)
 {
 	struct hang_callback_list *pList = NULL;
 
 	if (!callback_list)
 		return -1;
-
 
 	raw_spin_lock(&callback_list_lock);
 	pList = callback_list;
@@ -1188,6 +1284,8 @@ static void show_task_backtrace(void)
 	struct task_struct *monkey_task = NULL;
 	struct task_struct *aee_aed_task = NULL;
 	bool first_dump_blocked = false;
+	struct task_struct *task_array[MAX_NR_SPECIAL_PROCESS] = {0};
+	int i = 0, task_array_index = 0;
 
 #ifdef CONFIG_MTK_HANG_DETECT_DB
 	watchdog_thread_exist = false;
@@ -1219,16 +1317,22 @@ static void show_task_backtrace(void)
 		}
 		/* specify process, need dump maps file and native backtrace */
 		if (!first_dump_blocked &&
+			(task_array_index < MAX_NR_SPECIAL_PROCESS) &&
 			(!strcmp(p->comm, "init") ||
 			!strcmp(p->comm, "system_server") ||
 			!strcmp(p->comm, "vold") ||
 			!strcmp(p->comm, "vdc"))) {
-			show_bt_by_pid(p->pid);
-			put_task_struct(p);
+			task_array[task_array_index] = p;
+			task_array_index++;
+			if (task_array_index == MAX_NR_SPECIAL_PROCESS)
+				pr_info("Number of Specify processes is exceeded!\n");
 			continue;
 		}
-		if (!show_white_list_bt(p)) {
-			put_task_struct(p);
+		if (!is_in_white_list(p) && (task_array_index < MAX_NR_SPECIAL_PROCESS)) {
+			task_array[task_array_index] = p;
+			task_array_index++;
+			if (task_array_index == MAX_NR_SPECIAL_PROCESS)
+				pr_info("Number of Specify processes is exceeded!\n");
 			continue;
 		}
 		for_each_thread(p, t) {
@@ -1244,6 +1348,12 @@ static void show_task_backtrace(void)
 		put_task_struct(p);
 	}
 	rcu_read_unlock();
+	if (task_array_index > 0) {
+		for (i = 0; i < task_array_index; i++) {
+			show_bt_by_pid(task_array[i]->pid);
+			put_task_struct(task_array[i]);
+		}
+	}
 	log_hang_info("dump backtrace end: %llu\n", local_clock());
 	if (Hang_first_done == false) {
 		if (aee_aed_task)
@@ -1266,7 +1376,6 @@ static void show_status(int flag)
 	}
 #endif
 #endif
-
 
 #if IS_ENABLED(CONFIG_MTK_HANG_PROC)
 	show_mem(0, NULL);
@@ -1329,23 +1438,23 @@ void wake_up_dump(void)
 }
 
 
-bool check_white_list(void)
+static bool check_white_list(void)
 {
 	struct name_list *pList = NULL;
 
 	if (!white_list)
 		return true;
-	raw_spin_lock(&white_list_lock);
+	mutex_lock(&white_list_lock);
 	pList = white_list;
 	while (pList) {
 		if (find_task_by_name(pList->name) < 0) {
 			/* not fond the Task */
-			raw_spin_unlock(&white_list_lock);
+			mutex_unlock(&white_list_lock);
 			return false;
 		}
 		pList = pList->next;
 	}
-	raw_spin_unlock(&white_list_lock);
+	mutex_unlock(&white_list_lock);
 	return true;
 }
 
@@ -1361,7 +1470,6 @@ static int hang_detect_thread(void *arg)
 	reset_hang_info();
 	msleep(120 * 1000);
 	pr_debug("[Hang_Detect] hang_detect thread starts.\n");
-
 #ifdef BOOT_UP_HANG
 	hd_timeout = 9;
 	hang_detect_counter = 9;
@@ -1492,6 +1600,10 @@ static int __init monitor_hang_init(void)
 #endif
 #endif
 
+	thread_array = kzalloc(sizeof(struct task_struct *) * MAX_NR_THREAD, GFP_KERNEL);
+	if (thread_array == NULL)
+		return 1;
+
 	err = misc_register(&Hang_Monitor_dev);
 	if (unlikely(err)) {
 		pr_notice("failed to register Hang_Monitor_dev device!\n");
@@ -1505,7 +1617,6 @@ static int __init monitor_hang_init(void)
 	if (!pe)
 		return -ENOMEM;
 #endif
-
 	return err;
 }
 
@@ -1513,6 +1624,7 @@ static void __exit monitor_hang_exit(void)
 {
 	mrdump_regist_hang_bt(NULL);
 	misc_deregister(&Hang_Monitor_dev);
+	kfree(thread_array);
 #ifdef CONFIG_MTK_HANG_DETECT_DB
 	/* kfree(NULL) is safe */
 	kfree(Hang_Info);

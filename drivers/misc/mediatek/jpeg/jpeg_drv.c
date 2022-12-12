@@ -562,6 +562,10 @@ static int jpeg_hybrid_dec_ioctl(unsigned int cmd, unsigned long arg,
 		} while (_jpeg_hybrid_dec_int_status[hwid] == 0);
 
 	#else
+		if (!dec_hwlocked[hwid]) {
+			JPEG_LOG(0, "wait on unlock core %d\n", hwid);
+			return -EFAULT;
+		}
 		if (jpeg_isr_hybrid_dec_lisr(hwid) < 0) {
 			long ret = 0;
 			int waitfailcnt = 0;
@@ -595,8 +599,10 @@ static int jpeg_hybrid_dec_ioctl(unsigned int cmd, unsigned long arg,
 			return -EFAULT;
 		}
 
-		IMG_REG_WRITE(0x0, REG_JPGDEC_HYBRID_090(hwid));
-		IMG_REG_WRITE(0x00000010, REG_JPGDEC_HYBRID_090(hwid));
+		if (dec_hwlocked[hwid]) {
+			IMG_REG_WRITE(0x0, REG_JPGDEC_HYBRID_090(hwid));
+			IMG_REG_WRITE(0x00000010, REG_JPGDEC_HYBRID_090(hwid));
+		}
 
 		jpeg_drv_hybrid_dec_unlock(hwid);
 		break;
