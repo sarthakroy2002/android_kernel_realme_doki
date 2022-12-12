@@ -14,6 +14,9 @@
 #include <linux/of_platform.h>
 #include <linux/pm_qos.h>
 #include <linux/slab.h>
+#if IS_ENABLED(CONFIG_OPLUS_OMRG)
+#include <linux/oplus_omrg.h>
+#endif
 
 #define LUT_MAX_ENTRIES			32U
 #define LUT_FREQ			GENMASK(11, 0)
@@ -121,6 +124,9 @@ static unsigned int mtk_cpufreq_hw_fast_switch(struct cpufreq_policy *policy,
 		index = cpufreq_table_find_index_dl(policy, target_freq);
 
 	writel_relaxed(index, c->reg_bases[REG_FREQ_PERF_STATE]);
+#if IS_ENABLED(CONFIG_OPLUS_OMRG)
+	omrg_cpufreq_check_limit(policy, policy->freq_table[index].frequency);
+#endif
 
 	return policy->freq_table[index].frequency;
 }
@@ -133,10 +139,6 @@ static int mtk_cpufreq_hw_cpu_init(struct cpufreq_policy *policy)
 	struct pm_qos_request *qos_request;
 	int sig, pwr_hw = CPUFREQ_HW_STATUS | SVS_HW_STATUS;
 	unsigned int latency;
-
-	qos_request = kzalloc(sizeof(*qos_request), GFP_KERNEL);
-	if (!qos_request)
-		return -ENOMEM;
 
 	cpu_dev = get_cpu_device(policy->cpu);
 	if (!cpu_dev) {
@@ -164,6 +166,10 @@ static int mtk_cpufreq_hw_cpu_init(struct cpufreq_policy *policy)
 
 	policy->fast_switch_possible = true;
 
+	qos_request = kzalloc(sizeof(*qos_request), GFP_KERNEL);
+	if (!qos_request)
+		return -ENOMEM;
+
 	/* Let CPUs leave idle-off state for SVS CPU initializing */
 	cpu_latency_qos_add_request(qos_request, PM_QOS_DEFAULT_VALUE);
 
@@ -176,6 +182,8 @@ static int mtk_cpufreq_hw_cpu_init(struct cpufreq_policy *policy)
 		if (!(sig & CPUFREQ_HW_STATUS)) {
 			pr_info("cpufreq hardware of CPU%d is not enabled\n",
 				policy->cpu);
+			cpu_latency_qos_remove_request(qos_request);
+			kfree(qos_request);
 			return -ENODEV;
 		}
 
@@ -190,9 +198,20 @@ static int mtk_cpufreq_hw_cpu_init(struct cpufreq_policy *policy)
 	return 0;
 }
 
+#if IS_ENABLED(CONFIG_OPLUS_OMRG)
+static void mtk_cpufreq_ready(struct cpufreq_policy *policy)
+{
+	omrg_cpufreq_register(policy);
+}
+#endif
+
 static int mtk_cpufreq_hw_cpu_exit(struct cpufreq_policy *policy)
 {
 	struct cpufreq_mtk *c;
+
+#if IS_ENABLED(CONFIG_OPLUS_OMRG)
+	omrg_cpufreq_unregister(policy);
+#endif
 
 	c = mtk_freq_domain_map[policy->cpu];
 	if (!c) {
@@ -214,6 +233,9 @@ static struct cpufreq_driver cpufreq_mtk_hw_driver = {
 	.target_index	= mtk_cpufreq_hw_target_index,
 	.get		= mtk_cpufreq_hw_get,
 	.init		= mtk_cpufreq_hw_cpu_init,
+#if IS_ENABLED(CONFIG_OPLUS_OMRG)
+	.ready		= mtk_cpufreq_ready,
+#endif
 	.exit		= mtk_cpufreq_hw_cpu_exit,
 	.fast_switch	= mtk_cpufreq_hw_fast_switch,
 	.name		= "mtk-cpufreq-hw",
