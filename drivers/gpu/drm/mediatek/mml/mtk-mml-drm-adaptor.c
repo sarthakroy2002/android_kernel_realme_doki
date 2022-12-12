@@ -72,6 +72,9 @@ enum mml_mode mml_drm_query_cap(struct mml_drm_ctx *ctx,
 		}
 	}
 
+	if (info->dest_cnt > MML_MAX_OUTPUTS)
+		info->dest_cnt = MML_MAX_OUTPUTS;
+
 	if (!info->src.format) {
 		mml_err("[drm]invalid src mml color format %#010x", info->src.format);
 		goto not_support;
@@ -87,8 +90,9 @@ enum mml_mode mml_drm_query_cap(struct mml_drm_ctx *ctx,
 	}
 
 	/* for alpha rotate */
-	if (MML_FMT_IS_ARGB(info->src.format) &&
-		MML_FMT_IS_ARGB(info->dest[0].data.format)) {
+	if (info->alpha &&
+	    MML_FMT_IS_ARGB(info->src.format) &&
+	    MML_FMT_IS_ARGB(info->dest[0].data.format)) {
 		const struct mml_frame_dest *dest = &info->dest[0];
 		u32 srccw = dest->crop.r.width;
 		u32 srcch = dest->crop.r.height;
@@ -113,14 +117,23 @@ enum mml_mode mml_drm_query_cap(struct mml_drm_ctx *ctx,
 		const struct mml_frame_dest *dest = &info->dest[i];
 		u32 destw = dest->data.width;
 		u32 desth = dest->data.height;
+		u32 crop_srcw = dest->crop.r.width ? dest->crop.r.width : srcw;
+		u32 crop_srch = dest->crop.r.height ? dest->crop.r.height : srch;
 
 		if (dest->rotate == MML_ROT_90 || dest->rotate == MML_ROT_270)
 			swap(destw, desth);
 
-		if (srcw / destw > 20 || srch / desth > 255 ||
-			destw / srcw > 32 || desth / srch > 32) {
+		if (crop_srcw / destw > 20 || crop_srch / desth > 255 ||
+			destw / crop_srcw > 32 || desth / crop_srch > 32) {
 			mml_err("[drm]exceed HW limitation src %ux%u dest %ux%u",
-				srcw, srch, destw, desth);
+				crop_srcw, crop_srch, destw, desth);
+			goto not_support;
+		}
+
+		if ((crop_srcw * desth) / (destw * crop_srch) > 16 ||
+			(destw * crop_srch) / (crop_srcw * desth) > 16) {
+			mml_err("[drm]exceed tile ratio limitation src %ux%u dest %ux%u",
+				crop_srcw, crop_srch, destw, desth);
 			goto not_support;
 		}
 
@@ -393,16 +406,25 @@ static u32 frame_calc_layer_hrt(struct mml_drm_ctx *ctx, struct mml_frame_info *
 	u32 layer_w, u32 layer_h)
 {
 	/* MML HRT bandwidth calculate by
-	 *	width * height * Bpp * fps * v-blanking
+	 *	bw = width * height * Bpp * fps * v-blanking
+	 *
+	 * for raw data format, data size is
+	 *	bpp * width / 8
+	 * and for block format (such as UFO), data size is
+	 *	bpp * width / 256
 	 *
 	 * And for resize case total source pixel must read during layer
 	 * region (which is compose width and height). So ratio should be:
-	 *	panel * src / layer
+	 *	ratio = panel * src / layer
 	 *
-	 * This API returns bandwidth in KBps
+	 * This API returns bandwidth in KBps: bw * ratio
+	 *
+	 * Following api reorder factors to avoid overflow of uint32_t.
 	 */
+	const u32 bpp_div = MML_FMT_BLOCK(info->src.format) ? 256 : 8;
+
 	return ctx->panel_pixel / layer_w * info->src.width / layer_h * info->src.height *
-		MML_FMT_BITS_PER_PIXEL(info->src.format) / 8 * 122 / 100 *
+		MML_FMT_BITS_PER_PIXEL(info->src.format) / bpp_div * 122 / 100 *
 		MML_HRT_FPS / 1000;
 }
 
@@ -536,10 +558,14 @@ static void task_buf_put(struct mml_task *task)
 		mml_msg("[drm]release dest %hhu iova %#011llx",
 			i, task->buf.dest[i].dma[0].iova);
 		mml_buf_put(&task->buf.dest[i]);
+		if (task->buf.dest[i].fence)
+			dma_fence_put(task->buf.dest[i].fence);
 	}
 	mml_msg("[drm]release src iova %#011llx",
 		task->buf.src.dma[0].iova);
 	mml_buf_put(&task->buf.src);
+	if (task->buf.src.fence)
+		dma_fence_put(task->buf.src.fence);
 	mml_trace_ex_end();
 }
 
@@ -715,6 +741,12 @@ s32 mml_drm_submit(struct mml_drm_ctx *ctx, struct mml_submit *submit,
 			}
 		}
 	}
+
+	/* always fixup dest_cnt > MML_MAX_OUTPUTS */
+	if (submit->info.dest_cnt > MML_MAX_OUTPUTS)
+		submit->info.dest_cnt = MML_MAX_OUTPUTS;
+	if (submit->buffer.dest_cnt > MML_MAX_OUTPUTS)
+		submit->buffer.dest_cnt = MML_MAX_OUTPUTS;
 
 	/* always fixup format/modifier for afbc case
 	 * the format in info should change to fourcc format in future design

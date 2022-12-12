@@ -33,7 +33,7 @@
 #endif
 
 #ifdef CONFIG_MTK_ROUND_CORNER_SUPPORT
-#include "../mediatek/mtk_corner_pattern/mtk_data_hw_roundedpattern.h"
+#include "../mediatek/mediatek_v2/mtk_corner_pattern/mtk_data_hw_roundedpattern.h"
 #endif
 
 #define HSA 14
@@ -757,10 +757,7 @@ static int panel_doze_post_disp_on(struct drm_panel *panel,
 
 	int cmd = 0;
 
-#ifdef VENDOR_EDIT
-/* Hujie@PSW.MM.DisplayDriver.AOD, 2019/12/10, add for keylog*/
 	pr_info("debug for lcm %s\n", __func__);
-#endif
 
 	cmd = 0x29;
 	cb(dsi, handle, &cmd, 1);
@@ -877,6 +874,10 @@ static ssize_t aod_area_store(struct device *dev,
 
 	for (i = 0; i < count; i++) {
 		ret = sscanf(&buf[i], "%c", &doze_area_cmd[i]);
+		if (ret != 1) {
+			pr_info("%s ret = %d sscanf failed", __func__, ret);
+			return ret;
+		}
 		pr_info("%s ret = %d, buf[%d]=%d", __func__, ret, i, buf[i]);
 	}
 

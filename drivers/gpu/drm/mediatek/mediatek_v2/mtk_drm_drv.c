@@ -56,12 +56,27 @@
 #include "platform/mtk_drm_6789.h"
 
 #include "mtk_drm_mmp.h"
+//#ifdef OPLUS_BUG_STABILITY
+#include <mt-plat/mtk_boot_common.h>
+extern unsigned long silence_mode;
+//#endif
 /* *******Panel Master******** */
 #include "mtk_fbconfig_kdebug.h"
 #include "mtk_dp_api.h"
 //#include "swpm_me.h"
 //#include "include/pmic_api_buck.h"
 #include <../drivers/gpu/drm/mediatek/mml/mtk-mml.h>
+//#ifdef OPLUS_ADFR
+#include "oplus_adfr.h"
+//#include "../../oplus/oplus_display_private_api.h"
+//#include "../../oplus/oplus_display_panel.h"
+#include "oplus_display_private_api.h"
+#include "oplus/oplus_display_panel.h"
+//#endif
+/* #ifdef OPLUS_FEATURE_ONSCREENFINGERPRINT */
+/* add for ofp init */
+#include "oplus_display_onscreenfingerprint.h"
+/* #endif */ /* OPLUS_FEATURE_ONSCREENFINGERPRINT */
 
 #include "../mml/mtk-mml.h"
 #include "../mml/mtk-mml-drm-adaptor.h"
@@ -74,6 +89,11 @@
 
 #if IS_ENABLED(CONFIG_MTK_DEVINFO)
 #include <linux/nvmem-consumer.h>
+#endif
+#if defined(CONFIG_PXLW_IRIS)
+#include "iris_uapi.h"
+#include "iris_mtk_api.h"
+#include "iris_api.h"
 #endif
 
 #define DRIVER_NAME "mediatek"
@@ -95,10 +115,12 @@ unsigned long long mutex_time_end;
 long long mutex_time_period;
 const char *mutex_locker;
 
+#if defined(MTK_DRM_LOCKTIME_CHECK)
 unsigned long long mutex_nested_time_start;
 unsigned long long mutex_nested_time_end;
 long long mutex_nested_time_period;
 const char *mutex_nested_locker;
+#endif
 static int aod_scp_flag;
 
 struct lcm_fps_ctx_t lcm_fps_ctx[MAX_CRTC];
@@ -134,40 +156,24 @@ void **mtk_drm_disp_sec_cb_init(void)
 }
 EXPORT_SYMBOL(mtk_drm_disp_sec_cb_init);
 
-bool mtk_crtc_alloc_sram(struct mtk_drm_crtc *mtk_crtc)
+struct mtk_drm_disp_mtee_cb disp_mtee_cb;
+EXPORT_SYMBOL(disp_mtee_cb);
+
+void mtk_drm_svp_init(struct drm_device *dev)
 {
-	int ret = 0;
-	bool val = false;
-	int ret_slbc = 0;
-	struct slbc_data *sram = NULL;
-
-	if (!mtk_crtc)
-		return false;
-
-	if (mtk_crtc->mml_ir_sram)
-		return true;
-
-	mtk_crtc->mml_ir_sram = kzalloc(sizeof(struct slbc_data), GFP_KERNEL);
-	sram = mtk_crtc->mml_ir_sram;
-	sram->type = TP_BUFFER;
-	sram->size = 0;
-	sram->uid = UID_DISP;
-	sram->flag = 0;
-	ret_slbc = slbc_request(sram);
-	if (ret_slbc >= 0) {
-		ret = slbc_power_on(sram);
-		DDPINFO("%s success - ret:%d address:0x%lx size:0x%lx\n", __func__,
-			ret, (unsigned long)sram->paddr, sram->size);
-		DRM_MMP_MARK(sram_alloc, (unsigned long)sram->paddr, sram->size);
-		val = true;
-	} else {
-		DDPMSG("%s fail ret:%d\n", __func__, ret_slbc);
-		kfree(mtk_crtc->mml_ir_sram);
-		mtk_crtc->mml_ir_sram = NULL;
-		val = false;
-	}
-	return val;
+	if (IS_ERR_OR_NULL(dev))
+		DDPMSG("%s, disp debug init with invalid dev\n", __func__);
+	else
+		DDPMSG("%s, disp debug init\n", __func__);
+	disp_mtee_cb.dev = dev;
 }
+
+void **mtk_drm_disp_mtee_cb_init(void)
+{
+	DDPMSG("%s+\n", __func__);
+	return (void **)&disp_mtee_cb.cb;
+}
+EXPORT_SYMBOL(mtk_drm_disp_mtee_cb_init);
 
 
 int mtk_drm_ioctl_set_dither_param(struct drm_device *dev, void *data,
@@ -351,7 +357,6 @@ static void mtk_atomic_rsz_calc_dual_params(
 	u32 tile_in_len[2] = {0};
 	u32 tile_out_len[2] = {0};
 	u32 out_x[2] = {0};
-	bool is_dual = true;
 	int width = crtc->state->adjusted_mode.hdisplay;
 	struct mtk_drm_crtc *mtk_crtc = to_mtk_crtc(crtc);
 	struct mtk_ddp_comp *output_comp;
@@ -366,9 +371,6 @@ static void mtk_atomic_rsz_calc_dual_params(
 		tile_idx = 0;
 	else if (left >= width / 2)
 		tile_idx = 1;
-	else
-		is_dual = true;
-
 
 	DDPINFO("%s :loss:%d,idx:%d,width:%d,src_w:%d,dst_w:%d,src_x:%d\n", __func__,
 	       tile_loss, tile_idx, width, src_roi->width, dst_roi->width, src_roi->x);
@@ -389,21 +391,12 @@ static void mtk_atomic_rsz_calc_dual_params(
 		sub_offset[0] = sub_offset[0] - UNIT;
 	}
 
-	if (is_dual) {
-		/*left side*/
-		/*right bound - left bound + tile loss*/
-		tile_in_len[0] = (((width / 2) * src_roi->width * 10) /
+	/*left side*/
+	/*right bound - left bound + tile loss*/
+	tile_in_len[0] = (((width / 2) * src_roi->width * 10) /
 			dst_roi->width + 5) / 10 - src_roi->x + tile_loss;
-		tile_out_len[0] = width / 2 - dst_roi->x;
-		out_x[0] = dst_roi->x;
-	} else {
-		tile_in_len[0] = src_roi->width;
-		tile_out_len[0] = dst_roi->width;
-		if (tile_idx == 0)
-			out_x[0] = dst_roi->x;
-		else
-			out_x[0] = dst_roi->x - width / 2;
-	}
+	tile_out_len[0] = width / 2 - dst_roi->x;
+	out_x[0] = dst_roi->x;
 
 	param[tile_idx].out_x = out_x[0];
 	param[tile_idx].step = step;
@@ -411,17 +404,13 @@ static void mtk_atomic_rsz_calc_dual_params(
 	param[tile_idx].sub_offset = (u32)(sub_offset[0] & 0x1fffff);
 	param[tile_idx].in_len = tile_in_len[0];
 	param[tile_idx].out_len = tile_out_len[0];
-	DDPINFO("%s,%d:%s:step:%u,offset:%u.%u,len:%u->%u,out_x:%u\n", __func__, __LINE__,
-	       is_dual ? "dual" : "single",
+	DDPINFO("%s,%d:step:%u,offset:%u.%u,len:%u->%u,out_x:%u\n", __func__, __LINE__,
 	       param[0].step,
 	       param[0].int_offset,
 	       param[0].sub_offset,
 	       param[0].in_len,
 	       param[0].out_len,
 	       param[0].out_x);
-
-	if (!is_dual)
-		return;
 
 	/* right half */
 	tile_out_len[1] = dst_roi->width - tile_out_len[0];
@@ -454,8 +443,7 @@ static void mtk_atomic_rsz_calc_dual_params(
 	param[1].in_len = tile_in_len[1];
 	param[1].out_len = tile_out_len[1];
 
-	DDPINFO("%s,%d :%s:step:%u,offset:%u.%u,len:%u->%u,out_x:%u\n", __func__, __LINE__,
-	       is_dual ? "dual" : "single",
+	DDPINFO("%s,%d:step:%u,offset:%u.%u,len:%u->%u,out_x:%u\n", __func__, __LINE__,
 	       param[1].step,
 	       param[1].int_offset,
 	       param[1].sub_offset,
@@ -477,7 +465,7 @@ static void mtk_atomic_disp_rsz_roi(struct drm_device *dev,
 	struct mtk_rect src_layer_roi = {0};
 	struct mtk_rect src_total_roi[MAX_CRTC] = {0};
 	bool rsz_enable[MAX_CRTC] = {false};
-	struct mtk_plane_comp_state comp_state[MAX_CRTC][OVL_LAYER_NR];
+	struct mtk_plane_comp_state comp_state[MAX_CRTC][OVL_LAYER_NR] = {0};
 
 	for_each_old_crtc_in_state(old_state, crtc, old_crtc_state, i) {
 		struct mtk_drm_crtc *mtk_crtc = to_mtk_crtc(crtc);
@@ -502,7 +490,7 @@ static void mtk_atomic_disp_rsz_roi(struct drm_device *dev,
 		int tmp_w = 0, tmp_h = 0;
 		int idx;
 
-		if (!plane_state->crtc)
+		if (!plane_state->crtc || !crtc)
 			continue;
 
 		if (i < OVL_LAYER_NR)
@@ -703,6 +691,7 @@ static void mtk_atomic_force_doze_switch(struct drm_device *dev,
 		/* blocking flush before stop trigger loop */
 		mtk_crtc_pkt_create(&handle, &mtk_crtc->base,
 			mtk_crtc->gce_obj.client[CLIENT_CFG]);
+		DDPMSG("mtk_debug: %s,%d, pkt = 0x%p, client = CLIENT_CFG\n", __func__, __LINE__, handle);
 		if (mtk_crtc_is_frame_trigger_mode(crtc))
 			cmdq_pkt_wait_no_clear(handle,
 				mtk_crtc->gce_obj.event[EVENT_STREAM_EOF]);
@@ -720,6 +709,10 @@ static void mtk_atomic_force_doze_switch(struct drm_device *dev,
 		if (mtk_crtc_with_sodi_loop(crtc) &&
 			(!mtk_crtc_is_frame_trigger_mode(crtc)))
 			mtk_crtc_stop_sodi_loop(crtc);
+
+		if (mtk_crtc_with_event_loop(crtc) &&
+			(mtk_crtc_is_frame_trigger_mode(crtc)))
+			mtk_crtc_stop_event_loop(crtc);
 
 		if (mtk_crtc_is_frame_trigger_mode(crtc)) {
 			mtk_disp_mutex_disable(mtk_crtc->mutex[0]);
@@ -762,6 +755,10 @@ static void mtk_atomic_force_doze_switch(struct drm_device *dev,
 			(!mtk_crtc_is_frame_trigger_mode(crtc)))
 			mtk_crtc_start_sodi_loop(crtc);
 
+		if (mtk_crtc_with_event_loop(crtc) &&
+			(mtk_crtc_is_frame_trigger_mode(crtc)))
+			mtk_crtc_start_event_loop(crtc);
+
 #ifndef DRM_CMDQ_DISABLE
 		mtk_crtc_start_trig_loop(crtc);
 		cmdq_mbox_disable(client->chan); /* GCE clk refcnt - 1 */
@@ -793,7 +790,7 @@ static void mtk_atomic_doze_update_dsi_state(struct drm_device *dev,
 				}
 			//pmic_ldo_vio18_lp(SRCLKEN0, 0, 1, HW_LP);
 			//pmic_ldo_vio18_lp(SRCLKEN2, 0, 1, HW_LP);
-			clk_buf_voter_ctrl_by_id(12, SW_BBLPM);
+			clk_buf_voter_ctrl_by_id(12, SW_LPM);
 		} else if (!mtk_state->prop_val[CRTC_PROP_DOZE_ACTIVE]
 				&& !prepare) {
 			DDPMSG("exit AOD, enable PMIC LPMODE\n");
@@ -824,6 +821,7 @@ static void pq_bypass_cmdq_cb(struct cmdq_cb_data data)
 	cmdq_mbox_disable(client->chan); /* GCE clk refcnt - 1 */
 #endif
 
+	DDPMSG("mtk_debug: %s,%d, pkt = 0x%p, done!\n", __func__, __LINE__, cb_data->cmdq_handle);
 	cmdq_pkt_destroy(cb_data->cmdq_handle);
 	kfree(cb_data);
 }
@@ -839,8 +837,10 @@ static void mtk_atomit_doze_update_pq(struct drm_crtc *crtc, unsigned int stage,
 	unsigned int bypass = 0;
 
 #ifndef DRM_CMDQ_DISABLE
-	struct cmdq_client *client = mtk_crtc->gce_obj.client[CLIENT_DSI_CFG];
+	struct cmdq_client *client = mtk_crtc->gce_obj.client[CLIENT_CFG];
 #endif
+	/* skip this stage avoid cmdq_mbox control abnormal */
+	return;
 
 	DDPINFO("%s+: new crtc state = %d, old crtc state = %d, stage = %d\n", __func__,
 		crtc->state->active, old_state, stage);
@@ -917,6 +917,10 @@ static void mtk_atomit_doze_update_pq(struct drm_crtc *crtc, unsigned int stage,
 
 	if (cmdq_pkt_flush_threaded(cmdq_handle, pq_bypass_cmdq_cb, cb_data) < 0)
 		DDPPR_ERR("failed to flush user_cmd\n");
+#ifndef DRM_CMDQ_DISABLE
+	if (bypass)
+		cmdq_mbox_disable(client->chan); /* GCE clk refcnt - 1 */
+#endif
 }
 
 static void mtk_atomic_doze_preparation(struct drm_device *dev,
@@ -1105,11 +1109,33 @@ static struct mml_submit *mtk_alloc_mml_submit(void)
 	unsigned int i = 0;
 
 	temp = kzalloc(sizeof(struct mml_submit), GFP_KERNEL);
+	if (!temp) {
+		DDPPR_ERR("%s %d alloc fail\n", __func__, __LINE__);
+		return NULL;
+	}
 	temp->job = kzalloc(sizeof(struct mml_job), GFP_KERNEL);
-	for (i = 0; i < MML_MAX_OUTPUTS; ++i)
+	if (!temp->job) {
+		DDPPR_ERR("%s %d alloc fail\n", __func__, __LINE__);
+		goto err0;
+	}
+	for (i = 0; i < MML_MAX_OUTPUTS; ++i) {
 		temp->pq_param[i] =	kzalloc(sizeof(struct mml_pq_param), GFP_KERNEL);
+		if (!temp->pq_param[i]) {
+			DDPPR_ERR("%s %d alloc fail\n", __func__, __LINE__);
+			goto err1;
+		}
+	}
 
 	return temp;
+
+err1:
+	for (i = 0; i < MML_MAX_OUTPUTS; ++i)
+		kfree(temp->pq_param[i]);
+	kfree(temp->job);
+err0:
+	kfree(temp);
+
+	return NULL;
 }
 
 void mtk_free_mml_submit(struct mml_submit *temp)
@@ -1146,7 +1172,7 @@ int copy_mml_submit(struct mml_submit *src, struct mml_submit *dst)
 	memcpy(dst, src, sizeof(struct mml_submit));
 
 	if (temp_job) {
-		memcpy(temp_job, dst->job, sizeof(struct mml_job));
+		memmove(temp_job, dst->job, sizeof(struct mml_job));
 		dst->job = temp_job;
 	}
 
@@ -1231,6 +1257,8 @@ static void _mtk_atomic_mml_plane(struct drm_device *dev,
 		(mtk_plane_state->prop_val[PLANE_PROP_MML_SUBMIT]);
 
 	submit_kernel = mtk_alloc_mml_submit();
+	if (!submit_kernel)
+		return;
 	ret = copy_mml_submit_from_user(submit_user, submit_kernel);
 	if (ret < 0)
 		goto err_handle_mtk_atomic_mml_plane_free_mml_submit;
@@ -1287,7 +1315,7 @@ static void _mtk_atomic_mml_plane(struct drm_device *dev,
 
 			submit_kernel->buffer.src.use_dma = true;
 			submit_kernel->buffer.src.dmabuf[i] = fd_to_dma_buf(fd);
-			DDPINFO("%s:%d dmabuf:0x%x\n", __func__, __LINE__,
+			DDPINFO("%s:%d dmabuf:0x%p\n", __func__, __LINE__,
 				submit_kernel->buffer.src.dmabuf[i]);
 		}
 
@@ -1448,6 +1476,12 @@ static void mtk_atomic_complete(struct mtk_drm_private *private,
 
 	mtk_drm_enable_trig(drm, state);
 
+	//#ifdef OPLUS_ADFR
+	if (oplus_adfr_is_support()) {
+		oplus_adfr_dsi_display_auto_mode_update(drm);
+	}
+	//#endif
+
 	mtk_atomic_disp_rsz_roi(drm, state);
 
 	mtk_atomic_calculate_plane_enabled_number(drm, state);
@@ -1557,7 +1591,9 @@ static int mtk_atomic_commit(struct drm_device *drm,
 		DDP_MUTEX_LOCK_NESTED(&mtk_crtc->lock, i, __func__, __LINE__);
 		CRTC_MMP_EVENT_START(index, atomic_commit, 0, 0);
 	}
+#if defined(MTK_DRM_LOCKTIME_CHECK)
 	mutex_nested_time_start = sched_clock();
+#endif
 
 	ret = drm_atomic_helper_swap_state(state, 0);
 	if (ret) {
@@ -1572,6 +1608,7 @@ static int mtk_atomic_commit(struct drm_device *drm,
 	else
 		mtk_atomic_complete(private, state);
 
+#if defined(MTK_DRM_LOCKTIME_CHECK)
 	mutex_nested_time_end = sched_clock();
 	mutex_nested_time_period =
 			mutex_nested_time_end - mutex_nested_time_start;
@@ -1582,6 +1619,7 @@ static int mtk_atomic_commit(struct drm_device *drm,
 			(unsigned long)mutex_time_period, 0);
 		dump_stack();
 	}
+#endif
 
 err_mutex_unlock:
 	for (i = MAX_CRTC - 1; i >= 0; i--) {
@@ -1927,16 +1965,32 @@ static const struct mtk_addon_module_data mt6983_addon_wdma0_data[] = {
 	{DISP_WDMA0, ADDON_AFTER, DDP_COMPONENT_SPR0},
 };
 
+static const struct mtk_addon_module_data mt6983_addon_wdma0_data_v2[] = {
+	{DISP_WDMA0_v2, ADDON_AFTER, DDP_COMPONENT_OVL0_VIRTUAL0},
+};
+
 static const struct mtk_addon_module_data mt6983_addon_wdma2_data[] = {
 	{DISP_WDMA2, ADDON_AFTER, DDP_COMPONENT_SPR1},
+};
+
+static const struct mtk_addon_module_data mt6983_addon_wdma2_data_v2[] = {
+	{DISP_WDMA2_v2, ADDON_AFTER, DDP_COMPONENT_OVL1_VIRTUAL0},
 };
 
 static const struct mtk_addon_module_data mt6895_addon_wdma0_data[] = {
 	{DISP_WDMA0, ADDON_AFTER, DDP_COMPONENT_SPR0},
 };
 
+static const struct mtk_addon_module_data mt6895_addon_wdma0_data_v2[] = {
+	{DISP_WDMA0_v2, ADDON_AFTER, DDP_COMPONENT_OVL0_VIRTUAL0},
+};
+
 static const struct mtk_addon_module_data mt6895_addon_wdma2_data[] = {
 	{DISP_WDMA2, ADDON_AFTER, DDP_COMPONENT_SPR1},
+};
+
+static const struct mtk_addon_module_data mt6895_addon_wdma2_data_v2[] = {
+	{DISP_WDMA2_v2, ADDON_AFTER, DDP_COMPONENT_OVL1_VIRTUAL0},
 };
 
 static const struct mtk_addon_module_data mt6855_addon_rsz_data[] = {
@@ -2077,6 +2131,11 @@ static const struct mtk_addon_scenario_data mt6983_addon_main[ADDON_SCN_NR] = {
 				.module_data = mt6983_addon_wdma0_data,
 				.hrt_type = HRT_TB_TYPE_GENERAL1,
 			},
+		[WDMA_WRITE_BACK_OVL] = {
+				.module_num = ARRAY_SIZE(mt6983_addon_wdma0_data_v2),
+				.module_data = mt6983_addon_wdma0_data_v2,
+				.hrt_type = HRT_TB_TYPE_GENERAL1,
+			},
 		[MML_WITH_PQ] = {
 				.module_num = ARRAY_SIZE(addon_mml_rsz),
 				.module_data = addon_mml_rsz,
@@ -2112,6 +2171,11 @@ static const struct mtk_addon_scenario_data mt6983_addon_main_dual[ADDON_SCN_NR]
 		[WDMA_WRITE_BACK] = {
 				.module_num = ARRAY_SIZE(mt6983_addon_wdma2_data),
 				.module_data = mt6983_addon_wdma2_data,
+				.hrt_type = HRT_TB_TYPE_GENERAL1,
+			},
+		[WDMA_WRITE_BACK_OVL] = {
+				.module_num = ARRAY_SIZE(mt6983_addon_wdma2_data_v2),
+				.module_data = mt6983_addon_wdma2_data_v2,
 				.hrt_type = HRT_TB_TYPE_GENERAL1,
 			},
 		[MML_WITH_PQ] = {
@@ -2163,6 +2227,11 @@ static const struct mtk_addon_scenario_data mt6895_addon_main[ADDON_SCN_NR] = {
 				.module_data = mt6895_addon_wdma0_data,
 				.hrt_type = HRT_TB_TYPE_GENERAL1,
 			},
+		[WDMA_WRITE_BACK_OVL] = {
+				.module_num = ARRAY_SIZE(mt6895_addon_wdma0_data_v2),
+				.module_data = mt6895_addon_wdma0_data_v2,
+				.hrt_type = HRT_TB_TYPE_GENERAL1,
+			},
 		[MML_SRAM_ONLY] = {
 				.module_num = ARRAY_SIZE(addon_mml_sram_only_data),
 				.module_data = addon_mml_sram_only_data,
@@ -2189,6 +2258,11 @@ static const struct mtk_addon_scenario_data mt6895_addon_main_dual[ADDON_SCN_NR]
 		[WDMA_WRITE_BACK] = {
 				.module_num = ARRAY_SIZE(mt6895_addon_wdma2_data),
 				.module_data = mt6895_addon_wdma2_data,
+				.hrt_type = HRT_TB_TYPE_GENERAL1,
+			},
+		[WDMA_WRITE_BACK_OVL] = {
+				.module_num = ARRAY_SIZE(mt6895_addon_wdma2_data_v2),
+				.module_data = mt6895_addon_wdma2_data_v2,
 				.hrt_type = HRT_TB_TYPE_GENERAL1,
 			},
 		[MML_SRAM_ONLY] = {
@@ -3737,6 +3811,11 @@ int mtk_drm_get_display_caps_ioctl(struct drm_device *dev, void *data,
 			caps_info->max_bin = chist_data->data->max_bin;
 		}
 	}
+
+#if defined(CONFIG_PXLW_IRIS)
+	iris_prepare();
+#endif
+
 	return ret;
 }
 
@@ -3748,8 +3827,9 @@ int lcm_fps_ctx_init(struct drm_crtc *crtc)
 	unsigned int index;
 
 	if (!crtc || crtc->index >= MAX_CRTC) {
-		DDPPR_ERR("%s:invalid crtc:%d\n",
-			  __func__, crtc->base.id);
+		if (crtc)
+			DDPPR_ERR("%s:invalid crtc:%d\n",
+				__func__, crtc->base.id);
 		return -EINVAL;
 	}
 	index = crtc->index;
@@ -3826,7 +3906,7 @@ int lcm_fps_ctx_update(unsigned long long cur_ns,
 	unsigned long long delta;
 	unsigned long flags = 0;
 
-	if (index > MAX_CRTC)
+	if (index >= MAX_CRTC)
 		return -EINVAL;
 
 	if (!atomic_read(&lcm_fps_ctx[index].is_inited))
@@ -4395,7 +4475,7 @@ struct mml_drm_ctx *mtk_drm_get_mml_drm_ctx(struct drm_device *dev,
 		DDPPR_ERR("mml_drm_get_context fail. mml_ctx:%p\n", mml_ctx);
 	else {
 		priv->mml_ctx = mml_ctx;
-		DDPMSG("%s 2 0x%x", __func__, priv->mml_ctx);
+		DDPMSG("%s 2 0x%p", __func__, priv->mml_ctx);
 		return priv->mml_ctx;
 	}
 
@@ -4404,27 +4484,31 @@ err_handle_mtk_drm_get_mml_drm_ctx:
 	return priv->mml_ctx;
 }
 
+size_t mtk_gce_get_dummy_table(unsigned int mmsys_id,
+	struct dummy_mapping **table)
+{
+	size_t size = 0;
+
+	if ((mmsys_id == MMSYS_MT6983) ||
+		(mmsys_id == MMSYS_MT6895)) {
+		*table = mt6983_dispsys_dummy_register;
+		size = MT6983_DUMMY_REG_CNT;
+	} else if (mmsys_id == MMSYS_MT6879) {
+		*table = mt6879_dispsys_dummy_register;
+		size = MT6879_DUMMY_REG_CNT;
+	} else
+		return size;
+	return size;
+}
+
 static void mtk_drm_init_dummy_table(struct mtk_drm_private *priv)
 {
-	struct dummy_mapping *table;
-	size_t size;
+	struct dummy_mapping *table = NULL;
+	size_t size = 0;
 	int i;
 
-	switch (priv->data->mmsys_id) {
-	case MMSYS_MT6983:
-		table = mt6983_dispsys_dummy_register;
-		size = MT6983_DUMMY_REG_CNT;
-		break;
-	case MMSYS_MT6895:
-		/* mt6895 same with mt6983 */
-		table = mt6983_dispsys_dummy_register;
-		size = MT6983_DUMMY_REG_CNT;
-		break;
-	case MMSYS_MT6879:
-		table = mt6879_dispsys_dummy_register;
-		size = MT6879_DUMMY_REG_CNT;
-		break;
-	default:
+	size = mtk_gce_get_dummy_table(priv->data->mmsys_id, &table);
+	if (size == 0) {
 		DDPMSG("no dummy table\n");
 		return;
 	}
@@ -4453,6 +4537,45 @@ static void mtk_drm_init_dummy_table(struct mtk_drm_private *priv)
 		}
 	}
 }
+
+#if defined(CONFIG_PXLW_IRIS)
+int mtk_drm_ioctl_iris_operate_conf(struct drm_device *dev, void *data,
+		struct drm_file *file_priv)
+{
+	int ret = 0;
+	int index = 0;
+	struct mtk_drm_private *private = dev->dev_private;
+	struct drm_crtc *crtc = private->crtc[0];
+	struct mtk_drm_crtc *mtk_crtc = to_mtk_crtc(crtc);
+
+	if (!private) {
+		DDPPR_ERR("%s:%d, invalid arg:0x%p\n",
+				__func__, __LINE__,
+				private);
+		return -1;
+	}
+	if ((!crtc) || (!mtk_crtc)) {
+		DDPPR_ERR("%s:%d, invalid crtc:(0x%p,0x%p)\n",
+				__func__, __LINE__, crtc, mtk_crtc);
+		return -1;
+	}
+
+	index = drm_crtc_index(crtc);
+	if (index) {
+		DDPPR_ERR("%s:%d, invalid crtc:0x%p, index:%d\n",
+				__func__, __LINE__, crtc, index);
+		return -1;
+	}
+	if (!(mtk_crtc->enabled)) {
+		DDPINFO("%s:%d, slepted\n", __func__, __LINE__);
+		return 0;
+	}
+
+	ret = iris_operate_conf(data);
+
+	return ret;
+}
+#endif
 
 static int mtk_drm_kms_init(struct drm_device *drm)
 {
@@ -4587,15 +4710,31 @@ static int mtk_drm_kms_init(struct drm_device *drm)
 	init_waitqueue_head(&private->repaint_data.wq);
 	INIT_LIST_HEAD(&private->repaint_data.job_queue);
 	INIT_LIST_HEAD(&private->repaint_data.job_pool);
-	for (i = 0; i < MAX_CRTC ; ++i)
+	for (i = 0; i < MAX_CRTC ; ++i) {
 		atomic_set(&private->crtc_present[i], 0);
+		atomic_set(&private->crtc_rel_present[i], 0);
+	}
 	atomic_set(&private->rollback_all, 0);
 
 #ifdef CONFIG_DRM_MEDIATEK_DEBUG_FS
 	mtk_drm_debugfs_init(drm, private);
 #endif
 	disp_dbg_init(drm);
+	mtk_drm_svp_init(drm);
+
 	PanelMaster_Init(drm);
+
+//#ifdef OPLUS_ADFR
+	if (oplus_adfr_is_support()) {
+		oplus_adfr_init(drm, private);
+	}
+//#endif
+
+/* #ifdef OPLUS_FEATURE_ONSCREENFINGERPRINT */
+	/* add for ofp */
+	oplus_ofp_init(private);
+/* #endif */ /* OPLUS_FEATURE_ONSCREENFINGERPRINT */
+
 	if (mtk_drm_helper_get_opt(private->helper_opt,
 			MTK_DRM_OPT_MMDVFS_SUPPORT))
 		mtk_drm_mmdvfs_init(drm->dev);
@@ -4604,6 +4743,9 @@ static int mtk_drm_kms_init(struct drm_device *drm)
 
 	mtk_drm_first_enable(drm);
 
+#if defined(CONFIG_PXLW_IRIS)
+	iris_parse_param(drm);
+#endif
 	/*
 	 * When kernel init, SMI larb will get once for keeping
 	 * MTCMOS on. Then, this keeping will be released after
@@ -4742,6 +4884,8 @@ static const struct drm_ioctl_desc mtk_ioctls[] = {
 			  DRM_UNLOCKED),
 	DRM_IOCTL_DEF_DRV(MTK_CCORR_GET_IRQ, mtk_drm_ioctl_ccorr_get_irq,
 			  DRM_UNLOCKED),
+	DRM_IOCTL_DEF_DRV(MTK_AIBLD_CV_MODE, mtk_drm_ioctl_aibld_cv_mode,
+			  DRM_UNLOCKED),
 	DRM_IOCTL_DEF_DRV(MTK_SUPPORT_COLOR_TRANSFORM,
 				mtk_drm_ioctl_support_color_matrix,
 				DRM_UNLOCKED),
@@ -4784,6 +4928,12 @@ static const struct drm_ioctl_desc mtk_ioctls[] = {
 			  DRM_UNLOCKED),
 	DRM_IOCTL_DEF_DRV(MTK_AAL_GET_SIZE, mtk_drm_ioctl_aal_get_size,
 			  DRM_UNLOCKED),
+	DRM_IOCTL_DEF_DRV(MTK_AAL_SET_TRIGGER_STATE, mtk_drm_ioctl_aal_set_trigger_state,
+			  DRM_UNLOCKED),
+#if defined(CONFIG_PXLW_IRIS)
+	DRM_IOCTL_DEF_DRV(MSM_IRIS_OPERATE_CONF, mtk_drm_ioctl_iris_operate_conf,
+			  DRM_UNLOCKED|DRM_RENDER_ALLOW),
+#endif
 	DRM_IOCTL_DEF_DRV(MTK_HDMI_GET_DEV_INFO, mtk_drm_dp_get_dev_info,
 			  DRM_UNLOCKED),
 	DRM_IOCTL_DEF_DRV(MTK_HDMI_AUDIO_ENABLE, mtk_drm_dp_audio_enable,
@@ -4824,6 +4974,8 @@ static const struct drm_ioctl_desc mtk_ioctls[] = {
 			  DRM_UNLOCKED),
 	DRM_IOCTL_DEF_DRV(MTK_SET_PQ_CAPS, mtk_drm_ioctl_set_pq_caps,
 			  DRM_UNLOCKED),
+	DRM_IOCTL_DEF_DRV(MTK_SEC_HND_TO_GEM_HND, mtk_drm_sec_hnd_to_gem_hnd,
+			DRM_UNLOCKED | DRM_AUTH | DRM_RENDER_ALLOW),
 };
 
 static const struct file_operations mtk_drm_fops = {
@@ -5688,7 +5840,14 @@ SKIP_SIDE_DISP:
 	mtk_fence_init();
 
 	disp_dts_gpio_init(dev, private);
-
+//#ifdef OPLUS_BUG_STABILITY
+	pr_err("get_boot_mode() is %d\n", get_boot_mode());
+	if ((get_boot_mode() == SILENCE_BOOT)
+			||(get_boot_mode() == OPLUS_SAU_BOOT)) {
+		pr_err("%s OPLUS_SILENCE_BOOT set silence_mode to 1\n", __func__);
+		silence_mode = 1;
+	}
+//#endif
 	memcpy(&mydev, pdev, sizeof(mydev));
 
 	ret = component_master_add_with_match(dev, &mtk_drm_ops, match);
@@ -5816,6 +5975,8 @@ static const struct of_device_id mtk_drm_of_ids[] = {
 	 .data = &mt2712_mmsys_driver_data},
 	{.compatible = "mediatek,mt6779-mmsys",
 	 .data = &mt6779_mmsys_driver_data},
+	{.compatible = "mediatek,mt6789-disp",
+	 .data = &mt6789_mmsys_driver_data},
 	{.compatible = "mediatek,mt8173-mmsys",
 	 .data = &mt8173_mmsys_driver_data},
 	{.compatible = "mediatek,mt6885-mmsys",
@@ -5903,6 +6064,9 @@ static int __init mtk_drm_init(void)
 			goto err;
 		}
 	}
+
+	oplus_display_private_api_init();
+	oplus_display_panel_init();
 	DDPINFO("%s-\n", __func__);
 
 	return 0;
@@ -5920,6 +6084,8 @@ static void __exit mtk_drm_exit(void)
 
 	for (i = ARRAY_SIZE(mtk_drm_drivers) - 1; i >= 0; i--)
 		platform_driver_unregister(mtk_drm_drivers[i]);
+	oplus_display_private_api_exit();
+	oplus_display_panel_exit();
 }
 module_init(mtk_drm_init);
 module_exit(mtk_drm_exit);

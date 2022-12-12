@@ -1607,6 +1607,10 @@ static struct mtk_panel_params ext_params = {
 			},
 		},
 	},
+	.dyn = {
+		.switch_en = 1,
+		.data_rate = PLL_CLOCK * 2 + 1,
+	},
 
 };
 
@@ -1691,7 +1695,10 @@ static struct mtk_panel_params ext_params_wqhd = {
 			},
 		},
 	},
-
+	.dyn = {
+		.switch_en = 1,
+		.data_rate = PLL_CLOCK * 2 + 1,
+	},
 };
 
 static struct mtk_panel_params ext_params_fhd_120 = {
@@ -1745,6 +1752,10 @@ static struct mtk_panel_params ext_params_fhd_120 = {
 		.rc_tgt_offset_lo = 3,
 
 	},
+	.dyn = {
+		.switch_en = 1,
+		.data_rate = PLL_CLOCK_FHD * 2 + 1,
+	},
 };
 
 static struct mtk_panel_params ext_params_fhd_60 = {
@@ -1796,6 +1807,10 @@ static struct mtk_panel_params ext_params_fhd_60 = {
 		.rc_quant_incr_limit1 = 15,
 		.rc_tgt_offset_hi = 3,
 		.rc_tgt_offset_lo = 3,
+	},
+	.dyn = {
+		.switch_en = 1,
+		.data_rate = PLL_CLOCK_FHD * 2 + 1,
 	},
 };
 
@@ -1874,9 +1889,13 @@ static int mtk_panel_ext_param_set(struct drm_panel *panel,
 		ret = 1;
 	}
 
-	if (!ret)
+	if (!ret) {
+		if (m == NULL) {
+			DDPPR_ERR("%s:%d invalid display_mode\n", __func__, __LINE__);
+			return -1;
+		}
 		current_fps = drm_mode_vrefresh(m);
-
+	}
 	return ret;
 }
 

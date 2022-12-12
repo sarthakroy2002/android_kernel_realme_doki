@@ -83,7 +83,7 @@ unsigned long mtk_dp_atf_call(unsigned int cmd, unsigned int para)
 	arm_smccc_smc(MTK_SIP_DP_CONTROL, cmd, para,
 		x3, 0xFEFD, 0, 0, 0, &res);
 
-	DPTXDBG("%s cmd 0x%x, p1 0x%x, ret 0x%x-0x%x",
+	DPTXDBG("%s cmd 0x%x, p1 0x%x, ret 0x%lx-0x%lx",
 		__func__, cmd, para, res.a0, res.a1);
 	return res.a1;
 #else
@@ -852,7 +852,7 @@ void mhal_DPTx_audio_sample_arrange(struct mtk_dp *mtk_dp, BYTE bEnable)
 		msWrite4ByteMask(mtk_dp,
 			REG_3370_DP_ENCODER1_P0 + 4, 0, BITMASK(11:0));
 	}
-	DPTXMSG("Htt=%d, Hde=%d, ubLinkRate=%d, PixRateKhz=%d\n",
+	DPTXMSG("Htt=%d, Hde=%d, ubLinkRate=%d, PixRateKhz=%lu\n",
 		mtk_dp->info.DPTX_OUTBL.Htt, mtk_dp->info.DPTX_OUTBL.Hde,
 		mtk_dp->training_info.ubLinkRate, mtk_dp->info.DPTX_OUTBL.PixRateKhz);
 
@@ -1590,7 +1590,7 @@ bool mhal_DPTx_AuxRead_Bytes(struct mtk_dp *mtk_dp, BYTE ubCmd,
 						REG_3620_AUX_TX_P0);
 			}
 		} else
-			DPTXMSG("Read TimeOut 0x%x\n", usDPCDADDR);
+			DPTXMSG("Read TimeOut 0x%lx\n", usDPCDADDR);
 	}
 
 	msWrite2ByteMask(mtk_dp, REG_3650_AUX_TX_P0,
@@ -1788,7 +1788,7 @@ void mhal_DPTx_ISR(struct mtk_dp *mtk_dp)
 	if (int_status & BIT0)
 		EncIrqCnt++;
 
-	DPTXDBG("AuxIrqCnt:%d, TransIrqCnt:%d, EncIrqCnt:%d\n",
+	DPTXDBG("AuxIrqCnt:%lu, TransIrqCnt:%lu, EncIrqCnt:%lu\n",
 		AuxIrqCnt, TransIrqCnt, EncIrqCnt);
 }
 
@@ -2070,6 +2070,7 @@ void mhal_DPTx_PHYSetting(struct mtk_dp *mtk_dp)
 	DPTXDBG("0x4C:%#010x, 0x4C:%#010x", value, msRead4Byte(mtk_dp, 0x114C));
 
 //PORTING FROM CTP
+
 	msWrite4ByteMask(mtk_dp, 0x003C, 0x004 << 24, BITMASK(28:24));
 	msWrite4ByteMask(mtk_dp, 0x0008, 0x7 << 3, BITMASK(6:3));
 	msWrite4ByteMask(mtk_dp, 0x003C, BIT23, BIT23);
