@@ -1,7 +1,7 @@
 ../vendor/mediatek/kernel_modules/fpsgo_cus
 ../vendor/mediatek/kernel_modules/met_drv_v3
-../vendor/oplus/kernel/network/oplus_score
-../vendor/oplus/kernel/network/oplus_dns_hook
-../vendor/oplus/kernel/network/oplus_qr_scan
-../vendor/oplus/kernel/network/oplus_stats_calc
-../vendor/oplus/kernel/network/oplus_apps_monitor
+net/oplus_modules/oplus_score
+net/oplus_modules/oplus_dns_hook
+net/oplus_modules/oplus_qr_scan
+net/oplus_modules/oplus_stats_calc
+net/oplus_modules/oplus_apps_monitor
