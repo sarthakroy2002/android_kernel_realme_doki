@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 /*
  *
  * (C) COPYRIGHT 2019-2021 ARM Limited. All rights reserved.
@@ -43,5 +43,8 @@ void kbase_csf_queue_group_debugfs_init(struct kbase_context *kctx);
  * @kbdev: Pointer to the device
  */
 void kbase_csf_debugfs_init(struct kbase_device *kbdev);
+
+void kbase_csf_local_fence_wait_dump(struct kbase_context *kctx, unsigned int pid,
+                                     unsigned int flags, unsigned long time_in_microseconds);
 
 #endif /* _KBASE_CSF_CSG_DEBUGFS_H_ */
