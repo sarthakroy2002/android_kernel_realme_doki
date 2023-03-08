@@ -157,3 +157,8 @@ x509.genkey
 
 # Documentation toolchain
 sphinx_*/
+
+/out/
+/clang/
+/AnyKernel/
+/modules/
