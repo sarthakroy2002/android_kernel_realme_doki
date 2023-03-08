@@ -105,3 +105,4 @@ obj-$(CONFIG_MTK_BOOT_COMMON) += boot_common/
 #endif
 obj-$(CONFIG_MTK_TIMER_ACCURACY_TEST) += timer/
 obj-$(CONFIG_MTK_CAMERA_LDO) += wl2868c/
+obj-y += met_drv_v3/
